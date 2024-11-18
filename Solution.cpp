@@ -29,7 +29,7 @@ public:
         if (n != B.n || d != B.d) {
             throw std::invalid_argument("Matrix dimensions must match for multiplication");
         }
-        
+
         BlockDiagonalMatrix C(n, d);
 
         for (int i = 0; i < n; ++i) {
@@ -43,13 +43,13 @@ public:
                 }
             }
         }
-        
+
         return C;
     }
 
     BlockDiagonalMatrix inverse() const {
         BlockDiagonalMatrix inv(n, d);
-        
+
         for (int i = 0; i < n; ++i) {
             for (int j = 0; j < n; ++j) {
                 if (!blocks[i][j].empty()) {
@@ -64,7 +64,7 @@ public:
                 }
             }
         }
-        
+
         return inv;
     }
 
@@ -82,8 +82,8 @@ public:
             }
         }
 
-        for (const auto &row : fullMatrix) {
-            for (const auto &val : row) {
+        for (const auto& row : fullMatrix) {
+            for (const auto& val : row) {
                 std::cout << std::setw(10) << std::fixed << std::setprecision(4) << val;
             }
             std::cout << "\n";
@@ -97,11 +97,15 @@ int main() {
 
     BlockDiagonalMatrix A(n, d);
     A.setBlock(0, 0, std::vector<double>{1, 2, 3});
-    A.setBlock(1, 1, std::vector<double>{4, 5, 6});
+    A.setBlock(0, 1, std::vector<double>{4, 5, 6});
+    A.setBlock(1, 0, std::vector<double>{40, 50, 60});
+    A.setBlock(1, 1, std::vector<double>{100, 101, 102});
 
     BlockDiagonalMatrix B(n, d);
     B.setBlock(0, 0, std::vector<double>{7, 8, 9});
-    B.setBlock(1, 1, std::vector<double>{10, 11, 12});
+    B.setBlock(0, 1, std::vector<double>{10, 11, 12});
+    B.setBlock(1, 0, std::vector<double>{-4, -5, -6});
+    B.setBlock(1, 1, std::vector<double>{1, 1, 1});
 
     std::cout << "Matrix A:\n";
     A.display();
@@ -116,7 +120,8 @@ int main() {
     try {
         BlockDiagonalMatrix A_inv = A.inverse();
         A_inv.display();
-    } catch (const std::runtime_error& e) {
+    }
+    catch (const std::runtime_error& e) {
         std::cerr << e.what() << "\n";
     }
 
