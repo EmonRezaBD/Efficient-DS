@@ -1,12 +1,13 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+
 #include <vector>
 #include <iostream>
 #include <iomanip>
 
-// Kernel for block matrix multiplication
-__global__ void blockMatrixMultKernel(const double* A, const double* B, double* C,
-    int n, int d, int block_size) {
+// Kernel matrix multiplication
+__global__ void blockMatrixMultKernel(const double* A, const double* B, double* C, int n, int d, int block_size) 
+{
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int vec_idx = threadIdx.z;
@@ -24,29 +25,24 @@ __global__ void blockMatrixMultKernel(const double* A, const double* B, double* 
     }
 }
 
-__global__ void elementWiseInverseKernel(const double* input, double* output, 
-                                       int n, int d /*,bool* error_flag*/) {
-    int block_i = blockIdx.x;  // block row index
-    int block_j = blockIdx.y;  // block column index
-    int element_idx = threadIdx.x;  // element index within block
+__global__ void elementWiseInverseKernel(const double* input, double* output, int n, int d) //Kernel for inverse elements
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = n * n * d;
 
-    if (block_i < n && block_j < n && element_idx < d) {
-        int idx = (block_i * n + block_j) * d + element_idx;
+    if (idx < total_elements) {
         double value = input[idx];
-       /* 
-        if (value == 0.0) {
-            *error_flag = true;
-            return;
+       if (value != 0.0) {
+            output[idx] = 1.0 / value;
         }
-        */
-        output[idx] = 1.0 / value;
     }
 }
 
-class BlockDiagonalMatrix {
+class BlockDiagonalMatrix 
+{
 private:
     int n, d;
-    std::vector<std::vector<std::vector<double>>> blocks;
+    std::vector<std::vector<std::vector<double>>> blocks; //data storing
 
 public:
     BlockDiagonalMatrix(int n_, int d_) : n(n_), d(d_) {
@@ -81,20 +77,8 @@ public:
         }
     }
 
-  /*  void print() const {
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                std::cout << "Block[" << i << "][" << j << "]: ";
-                for (double val : blocks[i][j]) {
-                    std::cout << val << " ";
-                }
-                std::cout << std::endl;
-            }
-        }
-    }*/
-
     void printFormatted() const {
-        // Create a 6x6 matrix (for n=2, d=3)
+
         std::vector<std::vector<double>> fullMatrix(n * d, std::vector<double>(n * d, 0.0));
 
         // Fill the matrix with block values
@@ -107,7 +91,7 @@ public:
             }
         }
 
-        // Print the full matrix
+        // Printing the full matrix
         for (int i = 0; i < n * d; i++) {
             std::cout << " ";
             for (int j = 0; j < n * d; j++) {
@@ -118,10 +102,48 @@ public:
     }
 };
 
-// Function to multiply block matrices using CUDA
-void multiplyBlockMatrices(const BlockDiagonalMatrix& A, const BlockDiagonalMatrix& B,
-    BlockDiagonalMatrix& C, int n, int d) {
+//Matrix inversion function
+void inverse(const BlockDiagonalMatrix& A, BlockDiagonalMatrix& C, int n, int d)
+{
     // Flatten matrices for CUDA processing
+    std::vector<double> a_flat = A.flatten();
+    std::vector<double> c_flat(n* n* d);
+
+    // Allocate device memory
+    double* d_A,* d_C;
+    cudaMalloc(&d_A, n* n* d * sizeof(double));
+    cudaMalloc(&d_C, n* n* d * sizeof(double));
+
+    // Copy data to device
+    cudaMemcpy(d_A, a_flat.data(), n* n* d * sizeof(double), cudaMemcpyHostToDevice);
+
+    //For inverse
+    double* d_output;
+    cudaMalloc(&d_output, n* n* d * sizeof(double));
+    std::vector<double> flat_output(n* n* d);
+
+    // Launch kernel
+    int total_elements = n * n * d;
+    int threadsPerBlock = 256; 
+    int numBlocks = (total_elements + threadsPerBlock - 1) / threadsPerBlock;
+    elementWiseInverseKernel << <numBlocks, threadsPerBlock >> > (d_A, d_output, n, d);
+
+    cudaMemcpy(flat_output.data(), d_output, n* n* d * sizeof(double), cudaMemcpyDeviceToHost);
+
+    // Copy result back to host
+    cudaMemcpy(c_flat.data(), d_output, n* n* d * sizeof(double), cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(d_A);
+    cudaFree(d_C);
+
+    C.fromFlattened(c_flat);
+}
+
+
+// Multiplication function
+void multiplyBlockMatrices(const BlockDiagonalMatrix& A, const BlockDiagonalMatrix& B, BlockDiagonalMatrix& C, int n, int d) 
+{
     std::vector<double> a_flat = A.flatten();
     std::vector<double> b_flat = B.flatten();
     std::vector<double> c_flat(n * n * d);
@@ -137,23 +159,11 @@ void multiplyBlockMatrices(const BlockDiagonalMatrix& A, const BlockDiagonalMatr
     cudaMemcpy(d_B, b_flat.data(), n * n * d * sizeof(double), cudaMemcpyHostToDevice);
 
     // Define grid and block dimensions
-    dim3 blockDim(8, 8, d);  // Adjust these values based on your GPU
-    dim3 gridDim((n + blockDim.x - 1) / blockDim.x,
-        (n + blockDim.y - 1) / blockDim.y,
-        1);
-
-    //For inverse
-    double *d_output;
-    cudaMalloc(&d_output, n * n * d * sizeof(double));
-    std::vector<double> flat_output(n * n * d);
-
+    dim3 blockDim(8, 8, d);  // Can be varied based on requirement 
+    dim3 gridDim((n + blockDim.x - 1) / blockDim.x, (n + blockDim.y - 1) / blockDim.y, 1);
 
     // Launch kernel
     blockMatrixMultKernel << <gridDim, blockDim >> > (d_A, d_B, d_C, n, d, d);
-    elementWiseInverseKernel << <gridDim, blockDim >> > (d_A, d_output, n, d);
-
-    cudaMemcpy(flat_output.data(), d_output, n * n * d * sizeof(double),
-        cudaMemcpyDeviceToHost);
 
     // Copy result back to host
     cudaMemcpy(c_flat.data(), d_C, n * n * d * sizeof(double), cudaMemcpyDeviceToHost);
@@ -171,7 +181,6 @@ int main() {
     int n = 2;  // 2x2 block matrix
     int d = 3;  // Each block is a vector of size 3
 
-    // Initialize matrices A and B
     BlockDiagonalMatrix A(n, d);
     A.setBlock(0, 0, std::vector<double>{1, 2, 3});
    // A.setBlock(0, 1, std::vector<double>{4, 5, 6});
@@ -187,7 +196,7 @@ int main() {
     // Create result matrix
     BlockDiagonalMatrix C(n, d);
 
-    // Perform multiplication
+    //multiplication
     multiplyBlockMatrices(A, B, C, n, d);
 
     // Print results
@@ -201,8 +210,10 @@ int main() {
     C.printFormatted();
 
     std::cout << "\nA inserve:" << std::endl;
-    A.printFormatted();
 
+    //Inverse
+    inverse(A, C, n, d);
+    C.printFormatted();
 
     return 0;
 }
