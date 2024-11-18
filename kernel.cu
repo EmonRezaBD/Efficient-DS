@@ -1,215 +1,148 @@
-﻿#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
-#include <stdio.h>
-#include <iostream>
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 #include <vector>
-#include <iomanip>
-#include <stdexcept>
+#include <iostream>
 
-#define BLOCK_SIZE 256 // Threads per block
+// Kernel for block matrix multiplication
+__global__ void blockMatrixMultKernel(const double* A, const double* B, double* C,
+    int n, int d, int block_size) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int vec_idx = threadIdx.z;
 
-// Kernel for matrix multiplication of diagonal blocks
-__global__ void multiplyBlocksKernel(const double* A, const double* B, double* C, int d) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < d) {
-        C[idx] = A[idx] * B[idx];
-    }
-}
-
-// Kernel for matrix inversion of diagonal blocks
-__global__ void invertBlocksKernel(const double* A, double* A_inv, int d) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < d) {
-        if (A[idx] == 0) {
-            printf("Matrix is singular at index %d, cannot invert!\n", idx);
-            return;
+    if (row < n && col < n && vec_idx < d) {
+        double sum = 0.0;
+        for (int k = 0; k < n; k++) {
+            // Calculate indices for block matrices
+            int a_idx = (row * n + k) * d + vec_idx;
+            int b_idx = (k * n + col) * d + vec_idx;
+            sum += A[a_idx] * B[b_idx];
         }
-        A_inv[idx] = 1.0 / A[idx];
+        int c_idx = (row * n + col) * d + vec_idx;
+        C[c_idx] = sum;
     }
 }
 
 class BlockDiagonalMatrix {
 private:
-    int n; // Number of blocks
-    int d; // Size of each block
+    int n, d;
     std::vector<std::vector<std::vector<double>>> blocks;
 
 public:
-    // Constructor
-    BlockDiagonalMatrix(int n, int d) : n(n), d(d) {
-        blocks.resize(n, std::vector<std::vector<double>>(n, std::vector<double>(d, 0.0)));
+    BlockDiagonalMatrix(int n_, int d_) : n(n_), d(d_) {
+        blocks.resize(n, std::vector<std::vector<double>>(n, std::vector<double>(d)));
     }
 
-    // Set diagonal block
-    void setBlock(int row, int col, const std::vector<double>& diagonalElements) {
-        if (row >= n || col >= n) {
-            throw std::out_of_range("Block index out of range");
+    void setBlock(int i, int j, const std::vector<double>& values) {
+        if (i < n && j < n && values.size() == d) {
+            blocks[i][j] = values;
         }
-        if (diagonalElements.size() != d) {
-            throw std::invalid_argument("Diagonal must have exactly d elements");
-        }
-        blocks[row][col] = diagonalElements;
     }
 
-    // Get diagonal block
-    std::vector<double> getBlock(int row, int col) const {
-        if (row >= n || col >= n) {
-            throw std::out_of_range("Block index out of range");
-        }
-        return blocks[row][col];
-    }
-
-    // Matrix multiplication
-    BlockDiagonalMatrix multiply(const BlockDiagonalMatrix& B) const {
-        if (n != B.n || d != B.d) {
-            throw std::invalid_argument("Matrix dimensions must match for multiplication");
-        }
-
-        BlockDiagonalMatrix C(n, d);
-
-        // Flatten matrices for GPU processing
-        std::vector<double> A_flat(n * d, 0);
-        std::vector<double> B_flat(n * d, 0);
-        std::vector<double> C_flat(n * d, 0);
-
-        for (int i = 0; i < n; ++i) {
-            for (int j = 0; j < d; ++j) {
-                A_flat[i * d + j] = blocks[i][i][j];
-                B_flat[i * d + j] = B.blocks[i][i][j];
-            }
-        }
-
-        // Allocate GPU memory
-        double* d_A, * d_B, * d_C;
-        cudaMalloc(&d_A, n * d * sizeof(double));
-        cudaMalloc(&d_B, n * d * sizeof(double));
-        cudaMalloc(&d_C, n * d * sizeof(double));
-
-        // Copy data to GPU
-        cudaMemcpy(d_A, A_flat.data(), n * d * sizeof(double), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_B, B_flat.data(), n * d * sizeof(double), cudaMemcpyHostToDevice);
-
-        // Launch kernel
-        int gridSize = (d + BLOCK_SIZE - 1) / BLOCK_SIZE; // Blocks needed per block diagonal
-        multiplyBlocksKernel << <gridSize, BLOCK_SIZE >> > (d_A, d_B, d_C, d);
-
-        // Copy result back to CPU
-        cudaMemcpy(C_flat.data(), d_C, n * d * sizeof(double), cudaMemcpyDeviceToHost);
-
-        // Reconstruct result matrix
-        for (int i = 0; i < n; ++i) {
-            for (int j = 0; j < d; ++j) {
-                C.blocks[i][i][j] = C_flat[i * d + j];
-            }
-        }
-
-        // Free GPU memory
-        cudaFree(d_A);
-        cudaFree(d_B);
-        cudaFree(d_C);
-
-        return C;
-    }
-
-    // Matrix inversion
-    BlockDiagonalMatrix inverse() const {
-        BlockDiagonalMatrix inv(n, d);
-
-        // Flatten matrices for GPU processing
-        std::vector<double> A_flat(n * d, 0);
-        std::vector<double> A_inv_flat(n * d, 0);
-
-        for (int i = 0; i < n; ++i) {
-            for (int j = 0; j < d; ++j) {
-                A_flat[i * d + j] = blocks[i][i][j];
-            }
-        }
-
-        // Allocate GPU memory
-        double* d_A, * d_A_inv;
-        cudaMalloc(&d_A, n * d * sizeof(double));
-        cudaMalloc(&d_A_inv, n * d * sizeof(double));
-
-        // Copy data to GPU
-        cudaMemcpy(d_A, A_flat.data(), n * d * sizeof(double), cudaMemcpyHostToDevice);
-
-        // Launch kernel
-        int gridSize = (d + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        invertBlocksKernel << <gridSize, BLOCK_SIZE >> > (d_A, d_A_inv, d);
-
-        // Copy result back to CPU
-        cudaMemcpy(A_inv_flat.data(), d_A_inv, n * d * sizeof(double), cudaMemcpyDeviceToHost);
-
-        // Reconstruct result matrix
-        for (int i = 0; i < n; ++i) {
-            for (int j = 0; j < d; ++j) {
-                inv.blocks[i][i][j] = A_inv_flat[i * d + j];
-            }
-        }
-
-        // Free GPU memory
-        cudaFree(d_A);
-        cudaFree(d_A_inv);
-
-        return inv;
-    }
-
-    // Display function
-    /*void display() const {
-        for (int i = 0; i < n; ++i) {
-            for (double val : blocks[i][i]) {
-                std::cout << val << " ";
-            }
-            std::cout << "\n";
-        }
-    }*/
-    void display() const {
-        for (int row = 0; row < n * d; ++row) {
-            for (int col = 0; col < n * d; ++col) {
-                int blockRow = row / d;
-                int blockCol = col / d;
-                int innerRow = row % d;
-                int innerCol = col % d;
-
-                if (blockRow == blockCol && innerRow == innerCol) {
-                    std::cout << std::fixed << std::setprecision(4) << blocks[blockRow][blockCol][innerRow] << " ";
-                }
-                else {
-                    std::cout << std::fixed << std::setprecision(4) << 0.0 << " ";
+    std::vector<double> flatten() const {
+        std::vector<double> flat(n * n * d);
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int k = 0; k < d; k++) {
+                    flat[(i * n + j) * d + k] = blocks[i][j][k];
                 }
             }
-            std::cout << "\n";
+        }
+        return flat;
+    }
+
+    void fromFlattened(const std::vector<double>& flat) {
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int k = 0; k < d; k++) {
+                    blocks[i][j][k] = flat[(i * n + j) * d + k];
+                }
+            }
         }
     }
 
+    void print() const {
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                std::cout << "Block[" << i << "][" << j << "]: ";
+                for (double val : blocks[i][j]) {
+                    std::cout << val << " ";
+                }
+                std::cout << std::endl;
+            }
+        }
+    }
 };
 
-int main() {
-    int n = 2; // Number of diagonal blocks
-    int d = 3; // Size of each block
+// Function to multiply block matrices using CUDA
+void multiplyBlockMatrices(const BlockDiagonalMatrix& A, const BlockDiagonalMatrix& B,
+    BlockDiagonalMatrix& C, int n, int d) {
+    // Flatten matrices for CUDA processing
+    std::vector<double> a_flat = A.flatten();
+    std::vector<double> b_flat = B.flatten();
+    std::vector<double> c_flat(n * n * d);
 
+    // Allocate device memory
+    double* d_A, * d_B, * d_C;
+    cudaMalloc(&d_A, n * n * d * sizeof(double));
+    cudaMalloc(&d_B, n * n * d * sizeof(double));
+    cudaMalloc(&d_C, n * n * d * sizeof(double));
+
+    // Copy data to device
+    cudaMemcpy(d_A, a_flat.data(), n * n * d * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, b_flat.data(), n * n * d * sizeof(double), cudaMemcpyHostToDevice);
+
+    // Define grid and block dimensions
+    dim3 blockDim(8, 8, d);  // Adjust these values based on your GPU
+    dim3 gridDim((n + blockDim.x - 1) / blockDim.x,
+        (n + blockDim.y - 1) / blockDim.y,
+        1);
+
+    // Launch kernel
+    blockMatrixMultKernel << <gridDim, blockDim >> > (d_A, d_B, d_C, n, d, d);
+
+    // Copy result back to host
+    cudaMemcpy(c_flat.data(), d_C, n * n * d * sizeof(double), cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+
+    // Convert back to block matrix format
+    C.fromFlattened(c_flat);
+}
+
+int main() {
+    int n = 2;  // 2x2 block matrix
+    int d = 3;  // Each block is a vector of size 3
+
+    // Initialize matrices A and B
     BlockDiagonalMatrix A(n, d);
-    A.setBlock(0, 0, { 1.0, 2.0, 3.0 });
-    A.setBlock(1, 1, { 4.0, 5.0, 6.0 });
+    A.setBlock(0, 0, std::vector<double>{1, 2, 3});
+   // A.setBlock(0, 1, std::vector<double>{4, 5, 6});
+    //A.setBlock(1, 0, std::vector<double>{40, 50, 60});
+    A.setBlock(1, 1, std::vector<double>{10, 20, 30});
 
     BlockDiagonalMatrix B(n, d);
-    B.setBlock(0, 0, { 7.0, 8.0, 9.0 });
-    B.setBlock(1, 1, { 10.0, 11.0, 12.0 });
+    B.setBlock(0, 0, std::vector<double>{7, 8, 9});
+  //  B.setBlock(0, 1, std::vector<double>{10, 11, 12});
+   // B.setBlock(1, 0, std::vector<double>{-4, -5, -6});
+    B.setBlock(1, 1, std::vector<double>{2, 3, 4});
 
-    std::cout << "Matrix A:\n";
-    A.display();
+    // Create result matrix
+    BlockDiagonalMatrix C(n, d);
 
-    std::cout << "\nMatrix B:\n";
-    B.display();
+    // Perform multiplication
+    multiplyBlockMatrices(A, B, C, n, d);
 
-    std::cout << "\nA * B:\n";
-    BlockDiagonalMatrix C = A.multiply(B);
-    C.display();
-
-    std::cout << "\nInverse of A:\n";
-    BlockDiagonalMatrix A_inv = A.inverse();
-    A_inv.display();
+    // Print results
+    std::cout << "Matrix A:" << std::endl;
+    A.print();
+    std::cout << "\nMatrix B:" << std::endl;
+    B.print();
+    std::cout << "\nResult Matrix C = A * B:" << std::endl;
+    C.print();
 
     return 0;
 }
